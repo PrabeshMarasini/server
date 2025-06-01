@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstring>
 #include <unistd.h>
+#include <sstream>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <openssl/ssl.h>
@@ -12,7 +13,7 @@
 #include "server.hpp"
 #include "crypto.hpp"
 #include "packet_capture.hpp"
-#include "compression.hpp"
+#include "compress.hpp"
 #include "checksum.hpp"
 
 constexpr int SERVER_PORT = 5555;
