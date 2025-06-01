@@ -1,9 +1,12 @@
 #ifndef PACKET_CAPTURE_HPP
 #define PACKET_CAPTURE_HPP
+
 #include <vector>
 #include <string>
 #include <cstdint>
 #include <chrono>
+#include <functional>
+#include <thread>
 
 struct Packet {
     uint64_t number;
@@ -16,7 +19,7 @@ struct Packet {
     std::string other_info;
 };
 
-void start_packet_capture(int packets_per_sec, void(*on_packet)(const Packet&));
+std::thread start_packet_capture(int packets_per_sec, std::function<void(const Packet&)> on_packet);
+void stop_packet_capture();
 
 #endif
-
