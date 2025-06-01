@@ -1,6 +1,6 @@
 #include <zstd.h>
 #include <iostream>
-#include "compression.hpp"
+#include "compress.hpp"
 
 std::vector<uint8_t> compress_data(const uint8_t* input, size_t input_size) {
     size_t bound = ZSTD_compressBound(input_size);
