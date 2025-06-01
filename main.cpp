@@ -4,13 +4,20 @@
 #include <atomic>
 #include <csignal>
 #include <cstring>
-#include <unistd.h>     
-#include <netinet/in.h>  
-#include <sys/socket.h>  
-#include "client_handler.hpp"  
+#include <unistd.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <openssl/ssl.h>
+#include "client.hpp"
+#include "server.hpp"
+#include "crypto.hpp"
+#include "packet_capture.hpp"
+#include "compression.hpp"
+#include "checksum.hpp"
 
 constexpr int SERVER_PORT = 5555;
 constexpr int BACKLOG = 10;
+constexpr int PACKETS_PER_SEC = 5;
 
 std::atomic<bool> running(true);
 
@@ -19,62 +26,74 @@ void signal_handler(int signum) {
     running = false;
 }
 
+void client_session(SSL* ssl) {
+    start_packet_capture(PACKETS_PER_SEC, [ssl](const Packet& pkt) {
+        std::ostringstream oss;
+        oss << "Packet#" << pkt.number << " [" << pkt.timestamp << "] "
+            << pkt.source_ip << " -> " << pkt.destination_ip
+            << " [" << pkt.protocol << "] Size: " << pkt.size
+            << " Data: " << pkt.hexdump << " " << pkt.other_info;
+
+        std::string raw_data = oss.str();
+
+        std::vector<uint8_t> compressed = compress_data(
+            reinterpret_cast<const uint8_t*>(raw_data.data()),
+            raw_data.size()
+        );
+
+        std::string hash = compute_sha256(compressed.data(), compressed.size());
+        std::string hash_line = "SHA256: " + hash + "\n";
+        SSL_write(ssl, hash_line.c_str(), hash_line.size());
+        uint32_t len = compressed.size();
+        SSL_write(ssl, &len, sizeof(len));
+        SSL_write(ssl, compressed.data(), len);
+    });
+}
+
 int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("socket");
+    initialize_openssl();
+    SSL_CTX* ctx = create_server_context("cert.pem", "key.pem");
+    if (!ctx) {
+        std::cerr << "Failed to initialize TLS context.\n";
         return 1;
     }
 
-    int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt");
-        close(server_fd);
+    Server server(SERVER_PORT, BACKLOG);
+    if (!server.start()) {
+        std::cerr << "Server failed to start.\n";
+        SSL_CTX_free(ctx);
+        cleanup_openssl();
         return 1;
     }
-
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY; // 0.0.0.0
-    server_addr.sin_port = htons(SERVER_PORT);
-
-    if (bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind");
-        close(server_fd);
-        return 1;
-    }
-
-    if (listen(server_fd, BACKLOG) < 0) {
-        perror("listen");
-        close(server_fd);
-        return 1;
-    }
-
-    std::cout << "Server listening on port " << SERVER_PORT << "\n";
 
     std::vector<std::thread> client_threads;
 
     while (running) {
         sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
-
-        int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
+        int client_fd = server.accept_client(client_addr);
         if (client_fd < 0) {
-            if (running) {
-                perror("accept");
-            }
+            if (running) perror("accept");
             break;
         }
 
-        std::cout << "New client connected, fd: " << client_fd << "\n";
+        std::cout << "[Main] New TLS client connection, fd: " << client_fd << "\n";
 
-        client_threads.emplace_back([client_fd]() {
-            handle_client(client_fd);
+        client_threads.emplace_back([ctx, client_fd]() {
+            SSL* ssl = accept_tls_connection(ctx, client_fd);
+            if (!ssl) {
+                close(client_fd);
+                return;
+            }
+
+            client_session(ssl);
+
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
             close(client_fd);
-            std::cout << "Client disconnected, fd: " << client_fd << "\n";
+            std::cout << "[Main] Client session ended.\n";
         });
     }
 
@@ -82,8 +101,8 @@ int main() {
         if (t.joinable()) t.join();
     }
 
-    close(server_fd);
-    std::cout << "Server shutdown cleanly.\n";
-
+    SSL_CTX_free(ctx);
+    cleanup_openssl();
+    std::cout << "[Main] Server shutdown cleanly.\n";
     return 0;
 }
