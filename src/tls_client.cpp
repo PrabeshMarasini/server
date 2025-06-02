@@ -29,7 +29,13 @@ bool TLSClient::init() {
         return false;
     }
 
-    SSL_CTX_set_verify(ctx_, SSL_VERIFY_NONE, nullptr);
+    if (!SSL_CTX_load_verify_locations(ctx_, "cert.pem", nullptr)) {
+        print_ssl_error("[TLSClient] Failed to load CA cert file (../cert.pem)");
+        return false;
+    }
+
+    SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
+
     return true;
 }
 
