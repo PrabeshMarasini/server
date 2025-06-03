@@ -2,6 +2,8 @@
 #define TLS_CLIENT_HPP
 
 #include <string>
+#include <vector>
+#include <cstdint>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -12,8 +14,7 @@ public:
 
     bool init();
     bool connect_server();
-    bool send_data(const std::string& data);
-    std::string receive_data(size_t max_len = 4096);
+    void receive_and_process_packets();
     void cleanup();
 
 private:
@@ -26,6 +27,10 @@ private:
 
     bool create_socket();
     void print_ssl_error(const std::string& prefix);
+    
+    std::string read_hash_line();
+    bool read_exact_bytes(void* buffer, size_t bytes_to_read);
+    std::vector<uint8_t> read_compressed_data();
 };
 
 #endif
