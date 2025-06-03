@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <cstring>
 #include "tls_client.hpp"
+#include "compress.hpp"
 
 TLSClient::TLSClient(const std::string& server_addr, int server_port)
     : server_address_(server_addr), server_port_(server_port) {}
@@ -30,7 +31,7 @@ bool TLSClient::init() {
     }
 
     if (!SSL_CTX_load_verify_locations(ctx_, "cert.pem", nullptr)) {
-        print_ssl_error("[TLSClient] Failed to load CA cert file (../cert.pem)");
+        print_ssl_error("[TLSClient] Failed to load CA cert file (cert.pem)");
         return false;
     }
 
@@ -85,59 +86,109 @@ bool TLSClient::connect_server() {
     return true;
 }
 
-bool TLSClient::send_data(const std::string& data) {
-    if (!ssl_) return false;
-
-    int ret = SSL_write(ssl_, data.data(), static_cast<int>(data.size()));
-    if (ret <= 0) {
-        print_ssl_error("[TLSClient] SSL_write failed");
-        return false;
-    }
-
-    return true;
-}
-
-std::string TLSClient::receive_data(size_t max_len) {
-    if (!ssl_) return "";
-    
-    std::string all_data;
-    char buffer[4096];
+std::string TLSClient::read_hash_line() {
+    std::string hash_line;
+    char ch;
     
     while (true) {
-        int bytes = SSL_read(ssl_, buffer, sizeof(buffer) - 1);
+        int bytes = SSL_read(ssl_, &ch, 1);
         if (bytes <= 0) {
             int ssl_error = SSL_get_error(ssl_, bytes);
             if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
                 continue;
             }
+            std::cerr << "[TLSClient] Error reading hash line\n";
+            return "";
+        }
+        
+        hash_line += ch;
+        if (ch == '\n') {
             break;
-        }
-        
-        buffer[bytes] = '\0';
-        all_data += std::string(buffer, bytes);
-        
-        uint32_t data_len;
-        bytes = SSL_read(ssl_, &data_len, sizeof(data_len));
-        if (bytes <= 0) {
-            break;
-        }
-        
-        std::vector<uint8_t> compressed_data(data_len);
-        int total_read = 0;
-        while (total_read < static_cast<int>(data_len)) {
-            bytes = SSL_read(ssl_, compressed_data.data() + total_read, data_len - total_read);
-            if (bytes <= 0) {
-                break;
-            }
-            total_read += bytes;
-        }
-        
-        if (total_read == static_cast<int>(data_len)) {
-            std::cout << "[TLSClient] Received packet with " << data_len << " bytes of compressed data\n";
         }
     }
     
-    return all_data;
+    return hash_line;
+}
+
+bool TLSClient::read_exact_bytes(void* buffer, size_t bytes_to_read) {
+    size_t total_read = 0;
+    char* buf = static_cast<char*>(buffer);
+    
+    while (total_read < bytes_to_read) {
+        int bytes = SSL_read(ssl_, buf + total_read, bytes_to_read - total_read);
+        if (bytes <= 0) {
+            int ssl_error = SSL_get_error(ssl_, bytes);
+            if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+                continue;
+            }
+            std::cerr << "[TLSClient] Error reading exact bytes\n";
+            return false;
+        }
+        total_read += bytes;
+    }
+    
+    return true;
+}
+
+std::vector<uint8_t> TLSClient::read_compressed_data() {
+    uint32_t data_len;
+    if (!read_exact_bytes(&data_len, sizeof(data_len))) {
+        std::cerr << "[TLSClient] Failed to read data length\n";
+        return {};
+    }
+    
+    std::cout << "[TLSClient] Expecting " << data_len << " bytes of compressed data\n";
+    std::vector<uint8_t> compressed_data(data_len);
+    if (!read_exact_bytes(compressed_data.data(), data_len)) {
+        std::cerr << "[TLSClient] Failed to read compressed data\n";
+        return {};
+    }
+    
+    return compressed_data;
+}
+
+void TLSClient::receive_and_process_packets() {
+    if (!ssl_) {
+        std::cerr << "[TLSClient] No SSL connection available\n";
+        return;
+    }
+    
+    std::cout << "[TLSClient] Starting to receive packet data...\n";
+    
+    while (true) {
+        std::string hash_line = read_hash_line();
+        if (hash_line.empty()) {
+            std::cout << "[TLSClient] Connection closed or error reading hash line\n";
+            break;
+        }
+        
+        std::cout << "[TLSClient] Received hash: " << hash_line;
+        std::vector<uint8_t> compressed_data = read_compressed_data();
+        if (compressed_data.empty()) {
+            std::cout << "[TLSClient] Failed to read compressed data\n";
+            break;
+        }
+        
+        std::vector<uint8_t> decompressed_data = decompress_data(
+            compressed_data.data(), 
+            compressed_data.size()
+        );
+        
+        if (decompressed_data.empty()) {
+            std::cerr << "[TLSClient] Failed to decompress data\n";
+            continue;
+        }
+        
+        std::string original_packet_info(
+            reinterpret_cast<const char*>(decompressed_data.data()),
+            decompressed_data.size()
+        );
+        
+        std::cout << "[TLSClient] Decompressed packet info:\n" << original_packet_info << "\n";
+        std::cout << "----------------------------------------\n";
+    }
+    
+    std::cout << "[TLSClient] Packet reception ended\n";
 }
 
 void TLSClient::cleanup() {
